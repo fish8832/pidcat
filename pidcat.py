@@ -46,6 +46,9 @@ parser.add_argument('-t', '--tag', dest='tag', action='append', help='Filter out
 parser.add_argument('-i', '--ignore-tag', dest='ignored_tag', action='append', help='Filter output by ignoring specified tag(s)')
 parser.add_argument('-v', '--version', action='version', version='%(prog)s ' + __version__, help='Print the version number and exit')
 parser.add_argument('-a', '--all', dest='all', action='store_true', default=False, help='Print all log messages')
+parser.add_argument('-o', '--not-display-time', dest='not_display_time', action='store_true', help='Not display log time')
+parser.add_argument('-m', '--disable_message_color', dest='disable_message_color', action='store_true', help='Disable message color')
+parser.add_argument('-r', '--wrap_line', dest='wrap_line', action='store_true', help='Wrap line')
 
 args = parser.parse_args()
 min_level = LOG_LEVELS_MAP[args.min_level.upper()]
@@ -100,6 +103,8 @@ def colorize(message, fg=None, bg=None):
   return termcolor(fg, bg) + message + RESET
 
 def indent_wrap(message):
+  if not args.wrap_line:
+      return message
   if width == -1:
     return message
   message = message.replace('\t', '    ')
@@ -171,13 +176,19 @@ PID_START_DALVIK = re.compile(r'^E/dalvikvm\(\s*(\d+)\): >>>>> ([a-zA-Z0-9._:]+)
 PID_KILL  = re.compile(r'^Killing (\d+):([a-zA-Z0-9._:]+)/[^:]+: (.*)$')
 PID_LEAVE = re.compile(r'^No longer want ([a-zA-Z0-9._:]+) \(pid (\d+)\): .*$')
 PID_DEATH = re.compile(r'^Process ([a-zA-Z0-9._:]+) \(pid (\d+)\) has died.?$')
-LOG_LINE  = re.compile(r'^([A-Z])/(.+?)\( *(\d+)\): (.*?)$')
+if args.not_display_time:
+  LOG_LINE  = re.compile(r'^([A-Z])/(.+?)\( *(\d+)\): (.*?)$')
+else:
+  LOG_LINE  = re.compile(r'^(\d{2}-\d{1,2}\s\d{2}:\d{2}:\d{2}\.\d{3})\s([A-Z])/(.+?)\( *(\d+)\): (.*?)$')
 BUG_LINE  = re.compile(r'.*nativeGetEnabledTags.*')
 BACKTRACE_LINE = re.compile(r'^#(.*?)pc\s(.*?)$')
 
 adb_command = base_adb_command[:]
 adb_command.append('logcat')
-adb_command.extend(['-v', 'brief'])
+if args.not_display_time:
+  adb_command.extend(['-v', 'brief'])
+else:
+  adb_command.extend(['-v', 'time'])
 
 # Clear log before starting logcat
 if args.clear_logcat:
@@ -270,6 +281,29 @@ while True:
       seen_pids = True
       pids.add(pid)
 
+def append_log_time(linebuf, logtime, level):  
+  if args.not_display_time:
+    return linebuf
+  if not args.disable_message_color:
+    logtime = colorize_with_tag_type(level, logtime)
+  return linebuf + logtime + ""
+
+def colorize_with_tag_type(tag, linebuf):
+  result = linebuf
+  if tag == 'V':
+      result = colorize(linebuf, fg=WHITE)
+  elif tag == 'D':
+      result = colorize(linebuf, fg=BLUE)
+  elif tag == 'I':
+      result = colorize(linebuf, fg=GREEN)
+  elif tag == 'W':
+      result = colorize(linebuf, fg=YELLOW)
+  elif tag == 'E':
+      result = colorize(linebuf, fg=RED)
+  elif tag == 'F':
+      result = colorize(linebuf, fg=RED)
+  return result
+
 while adb.poll() is None:
   try:
     line = adb.stdout.readline().decode('utf-8', 'replace').strip()
@@ -286,7 +320,11 @@ while adb.poll() is None:
   if log_line is None:
     continue
 
-  level, tag, owner, message = log_line.groups()
+  logtime = ""
+  if args.not_display_time:
+    level, tag, owner, message = log_line.groups()
+  else:
+    logtime, level, tag, owner, message = log_line.groups()
   tag = tag.strip()
   start = parse_start_proc(line)
   if start:
@@ -297,8 +335,10 @@ while adb.poll() is None:
       app_pid = line_pid
 
       linebuf  = '\n'
+      linebuf = append_log_time(linebuf, logtime, level)
       linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
       linebuf += indent_wrap(' Process %s created for %s\n' % (line_package, target))
+      linebuf = append_log_time(linebuf, logtime, level)
       linebuf += colorize(' ' * (header_size - 1), bg=WHITE)
       linebuf += ' PID: %s   UID: %s   GIDs: %s' % (line_pid, line_uid, line_gids)
       linebuf += '\n'
@@ -309,6 +349,7 @@ while adb.poll() is None:
   if dead_pid:
     pids.remove(dead_pid)
     linebuf  = '\n'
+    linebuf = append_log_time(linebuf, logtime, level)
     linebuf += colorize(' ' * (header_size - 1), bg=RED)
     linebuf += ' Process %s (PID: %s) ended' % (dead_pname, dead_pid)
     linebuf += '\n'
@@ -332,6 +373,7 @@ while adb.poll() is None:
     continue
 
   linebuf = ''
+  linebuf = append_log_time(linebuf, logtime, level)
 
   if args.tag_width > 0:
     # right-align tag title and allocate color if needed
@@ -355,6 +397,9 @@ while adb.poll() is None:
   for matcher in RULES:
     replace = RULES[matcher]
     message = matcher.sub(replace, message)
-
-  linebuf += indent_wrap(message)
+  
+  if not args.disable_message_color:
+      linebuf += colorize_with_tag_type(level, message)
+  else:
+      linebuf += indent_wrap(message)
   print(linebuf.encode('utf-8'))
